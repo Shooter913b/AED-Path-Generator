@@ -1,0 +1,13 @@
+These are the steps to follow after finish creating the convex hull. This algorithim will follow A* type algorithim using a distance to target hueristic to find the best or close to best path.
+
+Find the entry (closest point to current) and find exit (closest point to target)
+
+Start building the path, the direct line from current to entry. All paths in priority queue must not intersect the hull when extend to target, so make sure we check that the line from the end of the path so far to the target does not intersect the convex hull. we need to move counter clockwise or clockwise depending on which side path we are on. If we are on the path that started at the entry point, choose which every direction gets you closer to the exit point. Once we have a path that does not intersect the hull when extended to target, add it to a priority queue sorted(smaller is better) by heuristic from the furthest point in the path to the target + the length of the segments already in the path.
+
+In a loop, Move clockwise in the hull, adding a path for each direct line from current to the hull. Each line that is added must not go through the convex hull. Stop loop on the first intersection with the hull, or if we reach the exit point. Make sure the paths follow the requirement outlined above
+
+Now do the same loop, but counter clockwise from the entry point.
+
+Now we use the prioity queue, and A* to develop the path that is the most promising, travesing clockwise or counter clockwise depending on the path. 
+
+

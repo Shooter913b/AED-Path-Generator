@@ -35,11 +35,12 @@ public class PathGenerator{
         plane.addSquare(s1.center.x, s1.center.y, s1.pt1.x, s1.pt1.y);
         plane.updatePlane();*/
         List<Circle> zones = new ArrayList<>();
-        Circle c1 = new Circle(new CoordinatePlane.Point2D(0, 0), 50); zones.add(c1);//c1
+        Circle c1 = new Circle(new CoordinatePlane.Point2D(25, -25), 50); zones.add(c1);//c1
         Circle c2 = new Circle(new CoordinatePlane.Point2D(-50, 50), 50); zones.add(c2);//c2
-        //Circle c3 = new Circle(new CoordinatePlane.Point2D(50, 100), 50); zones.add(c3);//3 convex
-        Circle c4 = new Circle(new CoordinatePlane.Point2D(75, 150), 50); zones.add(c4);// seperate conex
-        //Circle c5 = new Circle(new CoordinatePlane.Point2D(-75, 150), 50); zones.add(c4);//non intersecting
+        Circle c3 = new Circle(new CoordinatePlane.Point2D(50, 100), 50); zones.add(c3);// convex (edge case with c5)
+        //Circle c4 = new Circle(new CoordinatePlane.Point2D(100, 100), 50); zones.add(c4);//extra convex
+        Circle c5 = new Circle(new CoordinatePlane.Point2D(150, 100), 75); zones.add(c5);//extra convex large
+        //Circle c6 = new Circle(new CoordinatePlane.Point2D(150, 100), 100); zones.add(c6);//edge case
         generatePath(plane, new CoordinatePlane.Point2D(-100, -200), new CoordinatePlane.Point2D(200, 250), zones);
     }
     
@@ -405,6 +406,21 @@ public class PathGenerator{
         return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
     }
 
+    // Helper state for hull-based A* search
+    private static class HullPathState{
+        List<Integer> vertices; // sequence of hull indices, in order
+        double g;               // path length from current to last vertex
+        double f;               // g + heuristic (distance from last vertex to target)
+        int dir;                // +1 = clockwise, -1 = counterclockwise
+
+        HullPathState(List<Integer> vertices, double g, double f, int dir){
+            this.vertices = vertices;
+            this.g = g;
+            this.f = f;
+            this.dir = dir;
+        }
+    }
+
     private static void addShortestHullPath(Stack<CoordinatePlane.Point2D> points, Shape hull, CoordinatePlane.Point2D current, CoordinatePlane.Point2D target){
         if(hull == null || hull.vertices == null || hull.vertices.isEmpty()){
             return;
@@ -412,8 +428,15 @@ public class PathGenerator{
 
         List<CoordinatePlane.Point2D> vs = hull.vertices;
         int n = vs.size();
+        if(n == 1){
+            CoordinatePlane.Point2D only = vs.get(0);
+            if(points.isEmpty() || points.peek() != only){
+                points.push(only);
+            }
+            return;
+        }
 
-        // Find entry: vertex closest to current
+        // Find entry (closest to current) and exit (closest to target)
         int entryIdx = 0;
         double bestEntryDist = distanceSquared(current, vs.get(0));
         for(int i = 1; i < n; i++){
@@ -424,7 +447,6 @@ public class PathGenerator{
             }
         }
 
-        // Find exit: vertex closest to target
         int exitIdx = 0;
         double bestExitDist = distanceSquared(target, vs.get(0));
         for(int i = 1; i < n; i++){
@@ -435,56 +457,231 @@ public class PathGenerator{
             }
         }
 
-        if(n == 1){
-            CoordinatePlane.Point2D only = vs.get(0);
-            if(points.isEmpty() || points.peek() != only){
-                points.push(only);
+        PriorityQueue<HullPathState> open = new PriorityQueue<>(new Comparator<HullPathState>(){
+            @Override
+            public int compare(HullPathState a, HullPathState b){
+                return Double.compare(a.f, b.f);
             }
+        });
+
+        // 1) Start building the path: direct line from current to entry (if it doesn't cross the hull).
+        // If the line from entry to target intersects the hull, "develop" the path further around the hull
+        // in the direction that gets closer to exit until the extension to target is clear.
+        if(!segmentIntersectsHull(current, vs.get(entryIdx), vs, entryIdx)){
+            double g0 = Math.sqrt(distanceSquared(current, vs.get(entryIdx)));
+            List<Integer> baseVerts = new ArrayList<>();
+            baseVerts.add(entryIdx);
+
+            // choose direction based on which side is closer to exit
+            int cwSteps = (exitIdx - entryIdx + n) % n;
+            int ccwSteps = (entryIdx - exitIdx + n) % n;
+            int dirEntry = (cwSteps <= ccwSteps) ? +1 : -1;
+
+            HullPathState base = new HullPathState(baseVerts, g0, 0.0, dirEntry);
+            HullPathState developed = extendPathToVisibleTarget(base, vs, target);
+            if(developed != null){
+                int lastIdx = developed.vertices.get(developed.vertices.size() - 1);
+                double h0 = Math.sqrt(distanceSquared(vs.get(lastIdx), target));
+                developed.f = developed.g + h0;
+                open.add(developed);
+            }
+        }
+
+        // 2) Move clockwise from entry, adding initial paths current -> hull vertex,
+        //    stopping on first intersection or when we reach exit.
+        int idx = (entryIdx + 1) % n;
+        while(idx != entryIdx){
+            if(segmentIntersectsHull(current, vs.get(idx), vs, idx)){
+                break;
+            }
+            double g = Math.sqrt(distanceSquared(current, vs.get(idx)));
+            List<Integer> verts = new ArrayList<>();
+            verts.add(idx);
+            // this seed path is explicitly clockwise
+            HullPathState base = new HullPathState(verts, g, 0.0, +1);
+            HullPathState developed = extendPathToVisibleTarget(base, vs, target);
+            if(developed != null){
+                int lastIdx = developed.vertices.get(developed.vertices.size() - 1);
+                double h = Math.sqrt(distanceSquared(vs.get(lastIdx), target));
+                developed.f = developed.g + h;
+                open.add(developed);
+            }else{
+                break;
+            }
+            if(idx == exitIdx){
+                break;
+            }
+            idx = (idx + 1) % n;
+        }
+
+        // 3) Move counterclockwise from entry with same rules.
+        idx = (entryIdx - 1 + n) % n;
+        while(idx != entryIdx){
+            if(segmentIntersectsHull(current, vs.get(idx), vs, idx)){
+                break;
+            }
+            double g = Math.sqrt(distanceSquared(current, vs.get(idx)));
+            List<Integer> verts = new ArrayList<>();
+            verts.add(idx);
+            // this seed path is explicitly counterclockwise
+            HullPathState base = new HullPathState(verts, g, 0.0, -1);
+            HullPathState developed = extendPathToVisibleTarget(base, vs, target);
+            if(developed != null){
+                int lastIdx = developed.vertices.get(developed.vertices.size() - 1);
+                double h = Math.sqrt(distanceSquared(vs.get(lastIdx), target));
+                developed.f = developed.g + h;
+                open.add(developed);
+            }else{
+                break;
+            }
+            if(idx == exitIdx){
+                break;
+            }
+            idx = (idx - 1 + n) % n;
+        }
+
+        if(open.isEmpty()){
             return;
         }
 
-        // Compute path length going forward (in vertex order)
-        double forwardLen = 0.0;
-        int i = entryIdx;
-        while(i != exitIdx){
+        // 4) A*-like search along the hull, extending the most promising paths.
+        double[] bestG = new double[n];
+        Arrays.fill(bestG, Double.POSITIVE_INFINITY);
+        double bestGoal = Double.POSITIVE_INFINITY;
+        List<Integer> bestVertices = null;
+
+        while(!open.isEmpty()){
+            HullPathState state = open.poll();
+            if(state.f >= bestGoal){
+                // all remaining paths are no better than the best we have
+                break;
+            }
+
+            int lastIdx = state.vertices.get(state.vertices.size() - 1);
+            if(state.g >= bestG[lastIdx] + 1e-9){
+                // already have a better path to this vertex
+                continue;
+            }
+            bestG[lastIdx] = state.g;
+
+            CoordinatePlane.Point2D lastV = vs.get(lastIdx);
+
+            // Option: jump directly from this vertex to target, only if segment doesn't cut hull.
+            // We allow touching the hull at lastIdx, so pass lastIdx as the destination index.
+            if(!segmentIntersectsHull(lastV, target, vs, lastIdx)){
+                double toTarget = Math.sqrt(distanceSquared(lastV, target));
+                double total = state.g + toTarget;
+                if(total < bestGoal){
+                    bestGoal = total;
+                    bestVertices = new ArrayList<>(state.vertices);
+                }
+            }
+
+            // Expand exactly one neighbor according to the path's direction
+            int ni = (state.dir == +1) ? (lastIdx + 1) % n : (lastIdx - 1 + n) % n;
+            CoordinatePlane.Point2D nv = vs.get(ni);
+            double edgeCost = Math.sqrt(distanceSquared(lastV, nv));
+            double newG = state.g + edgeCost;
+
+            List<Integer> newVerts = new ArrayList<>(state.vertices);
+            newVerts.add(ni);
+            HullPathState baseChild = new HullPathState(newVerts, newG, 0.0, state.dir);
+            HullPathState developedChild = extendPathToVisibleTarget(baseChild, vs, target);
+
+            if(developedChild != null){
+                int lastChildIdx = developedChild.vertices.get(developedChild.vertices.size() - 1);
+                if(developedChild.g + 1e-9 < bestG[lastChildIdx]){
+                    double h = Math.sqrt(distanceSquared(vs.get(lastChildIdx), target));
+                    developedChild.f = developedChild.g + h;
+                    open.add(developedChild);
+                }
+            }
+        }
+
+        if(bestVertices != null){
+            for(int vidx : bestVertices){
+                points.push(vs.get(vidx));
+            }
+        }
+    }
+
+    // Extend a hull-based path further in its direction until the last vertex can see
+    // the target in a straight line without intersecting the hull. Returns a new HullPathState
+    // with updated vertices and g, or null if no such extension exists.
+    private static HullPathState extendPathToVisibleTarget(HullPathState base, List<CoordinatePlane.Point2D> vs, CoordinatePlane.Point2D target){
+        List<Integer> verts = new ArrayList<>(base.vertices);
+        double g = base.g;
+        int dir = base.dir;
+        int n = vs.size();
+
+        int lastIdx = verts.get(verts.size() - 1);
+        int safety = 0;
+
+        // Walk along the hull in the path's direction until the last vertex can see the target
+        // without intersecting the hull (other than at the vertex itself).
+        while(segmentIntersectsHull(vs.get(lastIdx), target, vs, lastIdx)){
+            int nextIdx = (dir == +1) ? (lastIdx + 1) % n : (lastIdx - 1 + n) % n;
+            // prevent infinite loops; if we have walked around more than n vertices, give up
+            if(safety > n){
+                return null;
+            }
+            double edgeCost = Math.sqrt(distanceSquared(vs.get(lastIdx), vs.get(nextIdx)));
+            g += edgeCost;
+            verts.add(nextIdx);
+            lastIdx = nextIdx;
+            safety++;
+        }
+
+        // if even after walking we still intersect, no valid extension
+        if(segmentIntersectsHull(vs.get(lastIdx), target, vs, lastIdx)){
+            return null;
+        }
+
+        return new HullPathState(verts, g, 0.0, dir);
+    }
+
+    private static boolean segmentIntersectsHull(CoordinatePlane.Point2D a, CoordinatePlane.Point2D b, List<CoordinatePlane.Point2D> hull, int bIndex){
+        int n = hull.size();
+        for(int i = 0; i < n; i++){
             int j = (i + 1) % n;
-            forwardLen += Math.sqrt(distanceSquared(vs.get(i), vs.get(j)));
-            i = j;
-        }
-
-        // Compute path length going backward (reverse vertex order)
-        double backwardLen = 0.0;
-        i = entryIdx;
-        while(i != exitIdx){
-            int j = (i - 1 + n) % n;
-            backwardLen += Math.sqrt(distanceSquared(vs.get(i), vs.get(j)));
-            i = j;
-        }
-
-        // Build the chosen path from entry to exit
-        List<CoordinatePlane.Point2D> path = new ArrayList<>();
-        if(forwardLen <= backwardLen){
-            i = entryIdx;
-            path.add(vs.get(i));
-            while(i != exitIdx){
-                int j = (i + 1) % n;
-                path.add(vs.get(j));
-                i = j;
+            // skip edges incident to the destination vertex b (we allow touching the hull at b)
+            if(i == bIndex || j == bIndex){
+                continue;
             }
-        }else{
-            i = entryIdx;
-            path.add(vs.get(i));
-            while(i != exitIdx){
-                int j = (i - 1 + n) % n;
-                path.add(vs.get(j));
-                i = j;
+            CoordinatePlane.Point2D p1 = hull.get(i);
+            CoordinatePlane.Point2D p2 = hull.get(j);
+            if(segmentsIntersect(a, b, p1, p2)){
+                return true;
             }
         }
+        return false;
+    }
 
-        // Push path points (entry to exit) onto the stack
-        for(CoordinatePlane.Point2D p : path){
-            points.push(p);
+    private static boolean segmentsIntersect(CoordinatePlane.Point2D p1, CoordinatePlane.Point2D p2, CoordinatePlane.Point2D q1, CoordinatePlane.Point2D q2){
+        double o1 = orientation(p1, p2, q1);
+        double o2 = orientation(p1, p2, q2);
+        double o3 = orientation(q1, q2, p1);
+        double o4 = orientation(q1, q2, p2);
+
+        if(o1 * o2 < 0 && o3 * o4 < 0){
+            return true;
         }
+
+        if(o1 == 0 && onSegment(p1, q1, p2)) return true;
+        if(o2 == 0 && onSegment(p1, q2, p2)) return true;
+        if(o3 == 0 && onSegment(q1, p1, q2)) return true;
+        if(o4 == 0 && onSegment(q1, p2, q2)) return true;
+
+        return false;
+    }
+
+    private static double orientation(CoordinatePlane.Point2D a, CoordinatePlane.Point2D b, CoordinatePlane.Point2D c){
+        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    }
+
+    private static boolean onSegment(CoordinatePlane.Point2D a, CoordinatePlane.Point2D b, CoordinatePlane.Point2D c){
+        return b.x <= Math.max(a.x, c.x) + 1e-9 && b.x + 1e-9 >= Math.min(a.x, c.x)
+            && b.y <= Math.max(a.y, c.y) + 1e-9 && b.y + 1e-9 >= Math.min(a.y, c.y);
     }
     
     static class Circle{
