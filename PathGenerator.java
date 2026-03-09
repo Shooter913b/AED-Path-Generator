@@ -191,7 +191,21 @@ public class PathGenerator{
 
     public static Square circumscribedSquare(CoordinatePlane.Point2D last, CoordinatePlane.Point2D target, Circle zone){
         double outerR = Math.pow(2,0.5)*zone.r;
-        CoordinatePlane.Point2D corner1 = closestPoint(target, lineCircleIntersection(last, target, zone));
+        List<CoordinatePlane.Point2D> intersections = lineCircleIntersection(last, target, zone);
+        CoordinatePlane.Point2D corner1;
+        if(!intersections.isEmpty()){
+            // Use the actual closest intersection to target when it exists
+            corner1 = closestPoint(target, intersections);
+        }else{
+            // Fallback: no intersection between the line and the (inflated) circle.
+            // Use the direction from the zone center toward the target to place corner1
+            // on the outer square radius.
+            double angleToTarget = Math.atan2(target.y - zone.center.y, target.x - zone.center.x);
+            corner1 = new CoordinatePlane.Point2D(
+                zone.center.x + outerR * Math.cos(angleToTarget),
+                zone.center.y + outerR * Math.sin(angleToTarget)
+            );
+        }
 
         double angle = Math.atan2(corner1.y-zone.center.y,corner1.x-zone.center.x);
         double ninety = Math.PI/2;
