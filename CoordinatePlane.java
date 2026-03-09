@@ -133,7 +133,7 @@ public class CoordinatePlane extends JPanel {
 
         public void draw(Graphics2D g, CoordinatePlane plane) {
 
-            g.setColor(Color.RED);
+            g.setColor(Color.CYAN);
 
             g.drawLine(
                     plane.toScreenX(x1),
